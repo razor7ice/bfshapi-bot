@@ -7,7 +7,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 BFSG-Checker von Michael Tribis\n\nSchick mir eine URL — ich prüfe sie sofort.\n\nBeispiel: bernhard-burger.de"
+        "👋 BFSG-Checker\n\nSchick mir eine URL — ich prüfe sie sofort.\n\nBeispiel: bernhard-burger.de"
     )
 
 async def check_website(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -20,12 +20,29 @@ async def check_website(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("⏳ Prüfe Website...")
 
     try:
-        params = {"url": url, "category": "accessibility", "strategy": "mobile", "locale": "de"}
-        response = requests.get("https://www.googleapis.com/pagespeedonline/v5/runPagespeed", params=params, timeout=40)
+        params = {
+            "url": url,
+            "category": "accessibility",
+            "strategy": "desktop",
+            "locale": "de"
+        }
+        response = requests.get(
+            "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
+            params=params,
+            timeout=60
+        )
         data = response.json()
 
         if "error" in data:
-            await update.message.reply_text("❌ Website nicht erreichbar.")
+            code = data["error"].get("code", 0)
+            if code == 400:
+                await update.message.reply_text(
+                    "⚠️ Diese Website blockiert automatische Prüfungen.\n\n"
+                    "👉 Manuell prüfen: wave.webaim.org\n"
+                    f"URL: {raw}"
+                )
+            else:
+                await update.message.reply_text(f"❌ Fehler: {data['error'].get('message', 'Unbekannt')}")
             return
 
         score = round(data["lighthouseResult"]["categories"]["accessibility"]["score"] * 100)
@@ -34,7 +51,7 @@ async def check_website(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if score >= 90:
             emoji = "🟢"
             status = "Gut — kein Handlungsbedarf"
-            empfehlung = "Dieser Kunde braucht uns nicht."
+            empfehlung = "Diesen Kunden überspringen."
         elif score >= 60:
             emoji = "🟡"
             status = "Verbesserungsbedarf — möglicher Kunde"
@@ -74,6 +91,11 @@ async def check_website(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await update.message.reply_text(msg, parse_mode="Markdown")
 
+    except requests.exceptions.Timeout:
+        await update.message.reply_text(
+            "⏱ Timeout — Website zu langsam.\n\n"
+            f"👉 Manuell prüfen: wave.webaim.org\nURL: {raw}"
+        )
     except Exception as e:
         await update.message.reply_text(f"❌ Fehler: {str(e)}")
 
