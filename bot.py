@@ -1,108 +1,138 @@
 import os
+import json
 import requests
+from datetime import datetime
 from telegram import Update
 from telegram.ext import Application, MessageHandler, CommandHandler, filters, ContextTypes
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+TOKEN   = os.environ.get("TELEGRAM_TOKEN", "8427264212:AAGXvFEA7oGO9YCJeXSF6oNLTr8K2-dUBN8")
+PSI_KEY = "AIzaSyCXUbeKhjJunanI6cx0oVmxC1_umQeHwp4"
+STATS_FILE = "/tmp/bfsg_stats.json"
 
+# ── STATS ─────────────────────────────────────────────────────────────────
+def load_stats():
+    try:
+        with open(STATS_FILE) as f:
+            return json.load(f)
+    except:
+        return {"checks":0,"orders":0,"today_checks":0,"today_orders":0,"date":""}
+
+def save_stats(s):
+    try:
+        with open(STATS_FILE,"w") as f:
+            json.dump(s, f)
+    except:
+        pass
+
+def inc_stat(key):
+    s = load_stats()
+    today = str(datetime.now().date())
+    if s.get("date") != today:
+        s["today_checks"] = 0
+        s["today_orders"] = 0
+        s["date"] = today
+    s[key] = s.get(key, 0) + 1
+    if key == "checks":
+        s["today_checks"] = s.get("today_checks", 0) + 1
+    if key == "orders":
+        s["today_orders"] = s.get("today_orders", 0) + 1
+    save_stats(s)
+
+# ── COMMANDS ──────────────────────────────────────────────────────────────
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 BFSG-Checker\n\nSchick mir eine URL — ich prüfe sie sofort.\n\nBeispiel: bernhard-burger.de"
+        "👋 BFSG-Bot\n\n"
+        "Schick mir eine URL — ich prüfe sie sofort.\n\n"
+        "📊 /stats — Statistiken\n"
+        "Beispiel: obi.de"
     )
 
-async def check_website(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    s = load_stats()
+    msg = (
+        "📊 *Statistiken — Abmahnrisiko.de*\n\n"
+        f"🔍 Prüfungen gesamt: *{s.get('checks', 0)}*\n"
+        f"🔍 Heute: *{s.get('today_checks', 0)}*\n\n"
+        f"💳 Bestellungen gesamt: *{s.get('orders', 0)}*\n"
+        f"💳 Heute: *{s.get('today_orders', 0)}*"
+    )
+    await update.message.reply_text(msg, parse_mode="Markdown")
+
+# ── URL CHECK ─────────────────────────────────────────────────────────────
+async def check_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw = update.message.text.strip()
-    if not raw.startswith("http"):
-        url = "https://" + raw
-    else:
-        url = raw
+    u = raw if raw.startswith("http") else "https://" + raw
 
     await update.message.reply_text("⏳ Prüfe Website...")
 
     try:
-        params = {
-            "url": url,
-            "category": "accessibility",
-            "strategy": "desktop",
-            "locale": "de"
-        }
-        response = requests.get(
+        r = requests.get(
             "https://www.googleapis.com/pagespeedonline/v5/runPagespeed",
-            params=params,
+            params={"url":u,"category":"accessibility","strategy":"desktop","locale":"de","key":PSI_KEY},
             timeout=60
         )
-        data = response.json()
+        d = r.json()
 
-        if "error" in data:
-            code = data["error"].get("code", 0)
-            if code == 400:
-                await update.message.reply_text(
-                    "⚠️ Diese Website blockiert automatische Prüfungen.\n\n"
-                    "👉 Manuell prüfen: wave.webaim.org\n"
-                    f"URL: {raw}"
-                )
-            else:
-                await update.message.reply_text(f"❌ Fehler: {data['error'].get('message', 'Unbekannt')}")
+        if "error" in d:
+            await update.message.reply_text("⚠️ Website nicht erreichbar oder blockiert.")
             return
 
-        score = round(data["lighthouseResult"]["categories"]["accessibility"]["score"] * 100)
-        audits = data["lighthouseResult"]["audits"]
+        score = round(d["lighthouseResult"]["categories"]["accessibility"]["score"] * 100)
+        audits = d["lighthouseResult"]["audits"]
 
-        if score >= 90:
-            emoji = "🟢"
-            status = "Gut — kein Handlungsbedarf"
-            empfehlung = "Diesen Kunden überspringen."
-        elif score >= 60:
-            emoji = "🟡"
-            status = "Verbesserungsbedarf — möglicher Kunde"
-            empfehlung = "Anschreiben lohnt sich."
-        else:
-            emoji = "🔴"
-            status = "KRITISCH — sofort ansprechen"
-            empfehlung = "Das ist unser Kunde. Jetzt kontaktieren."
-
-        issue_map = {
-            "image-alt": "Bilder ohne Alt-Text",
+        ISSUE_MAP = {
+            "image-alt":      "Bilder ohne Alt-Text",
             "color-contrast": "Zu geringer Farbkontrast",
-            "label": "Formularfelder ohne Label",
+            "label":          "Formularfelder ohne Label",
+            "html-has-lang":  "Sprache nicht gesetzt",
+            "link-name":      "Links ohne Beschriftung",
             "document-title": "Seitentitel fehlt",
-            "html-has-lang": "Sprache nicht gesetzt",
-            "heading-order": "Falsche Überschriften-Reihenfolge",
-            "link-name": "Links ohne Beschriftung",
+            "heading-order":  "Falsche Überschriften-Reihenfolge",
         }
 
-        issues = []
-        for key, label in issue_map.items():
-            audit = audits.get(key, {})
-            if audit.get("score") == 0:
-                items = audit.get("details", {}).get("items", [])
-                count = f" ({len(items)}x)" if items else ""
-                issues.append(f"• {label}{count}")
+        CRITICAL = {"image-alt","color-contrast","label","html-has-lang","link-name"}
 
-        issues_text = "\n".join(issues[:6]) if issues else "Keine kritischen Verstöße"
+        issues = []
+        has_critical = False
+        for key, label in ISSUE_MAP.items():
+            a = audits.get(key, {})
+            if a.get("score") == 0:
+                count = len(a.get("details", {}).get("items", []))
+                issues.append(f"• {label} ({count}x)")
+                if key in CRITICAL:
+                    has_critical = True
+
+        if has_critical:
+            emoji = "🔴"
+            status = "Abmahnrisiko"
+        elif score >= 90:
+            emoji = "🟢"
+            status = "Konform"
+        else:
+            emoji = "🟡"
+            status = "Verbesserungsbedarf"
+
+        issues_text = "\n".join(issues[:6]) if issues else "Keine kritischen Fehler"
 
         msg = (
             f"{emoji} *{status}*\n"
             f"Score: *{score}/100*\n"
-            f"Website: {raw}\n\n"
-            f"*Verstöße:*\n{issues_text}\n\n"
-            f"💡 _{empfehlung}_"
+            f"URL: {raw}\n\n"
+            f"*Verstöße:*\n{issues_text}"
         )
-
         await update.message.reply_text(msg, parse_mode="Markdown")
 
     except requests.exceptions.Timeout:
-        await update.message.reply_text(
-            "⏱ Timeout — Website zu langsam.\n\n"
-            f"👉 Manuell prüfen: wave.webaim.org\nURL: {raw}"
-        )
+        await update.message.reply_text("⏱ Timeout — Website zu langsam.")
     except Exception as e:
         await update.message.reply_text(f"❌ Fehler: {str(e)}")
 
+# ── MAIN ──────────────────────────────────────────────────────────────────
 def main():
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_website))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, check_url))
     print("Bot läuft...")
     app.run_polling()
 
