@@ -1,68 +1,71 @@
 import os
 import requests
-from datetime import datetime, timezone
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
+from datetime import datetime, timezone, timedelta
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
 TOKEN   = os.environ.get("TELEGRAM_TOKEN", "8427264212:AAGXvFEA7oGO9YCJeXSF6oNLTr8K2-dUBN8")
 CHAT_ID = "731884877"
 
-def count_messages():
-    """Count messages in chat using getUpdates history"""
+KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton("📊 Heute"), KeyboardButton("📅 Woche"), KeyboardButton("🗓 Monat")]],
+    resize_keyboard=True,
+    persistent=True
+)
+
+def get_stats(days):
     checks = 0
     orders = 0
-    today_checks = 0
-    today_orders = 0
-    today = datetime.now(timezone.utc).date()
+    since  = datetime.now(timezone.utc) - timedelta(days=days)
 
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/getUpdates"
-        params = {"limit": 100, "offset": -100}
-        r = requests.get(url, params=params, timeout=10)
-        updates = r.json().get("result", [])
-
-        for u in updates:
-            msg = u.get("message", {})
+        r   = requests.get(url, params={"limit":100,"offset":-100}, timeout=10)
+        for u in r.json().get("result", []):
+            msg  = u.get("message", {})
             text = msg.get("text", "")
-            date = msg.get("date", 0)
-            msg_date = datetime.fromtimestamp(date, tz=timezone.utc).date()
-
+            ts   = datetime.fromtimestamp(msg.get("date", 0), tz=timezone.utc)
+            if ts < since:
+                continue
             if "BESTELLUNG" in text:
                 orders += 1
-                if msg_date == today:
-                    today_orders += 1
-            elif any(x in text for x in ["ABMAHNRISIKO", "Verbesserungsbedarf", "Konform"]):
+            elif any(x in text for x in ["ABMAHNRISIKO","Verbesserungsbedarf","Konform"]):
                 checks += 1
-                if msg_date == today:
-                    today_checks += 1
-
     except Exception as e:
-        print(f"Error: {e}")
+        print(e)
 
-    return checks, orders, today_checks, today_orders
+    return checks, orders
+
+def format_stats(label, days):
+    checks, orders = get_stats(days)
+    return (
+        f"📊 *{label}*\n\n"
+        f"🔍 Prüfungen: *{checks}*\n"
+        f"💳 Bestellungen: *{orders}*"
+    )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📊 BFSG Stats Bot\n\n"
-        "/stats — Statistiken anzeigen"
+        "📊 BFSG Stats Bot\n\nWähle einen Zeitraum:",
+        reply_markup=KEYBOARD
     )
 
-async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("⏳ Zähle...")
-    checks, orders, today_c, today_o = count_messages()
-    await update.message.reply_text(
-        "📊 *Abmahnrisiko.de — Statistiken*\n\n"
-        f"🔍 Prüfungen gesamt: *{checks}*\n"
-        f"🔍 Heute: *{today_c}*\n\n"
-        f"💳 Bestellungen gesamt: *{orders}*\n"
-        f"💳 Heute: *{today_o}*",
-        parse_mode="Markdown"
-    )
+async def handle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text or ""
+    if "Heute" in text:
+        msg = format_stats("Heute", 1)
+    elif "Woche" in text:
+        msg = format_stats("Diese Woche", 7)
+    elif "Monat" in text:
+        msg = format_stats("Dieser Monat", 30)
+    else:
+        return
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=KEYBOARD)
 
 def main():
     app = Application.builder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle))
     print("Bot läuft...")
     app.run_polling()
 
